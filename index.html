@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PostLog — ポストアーカイブビューア</title>
+<!--
+  独自デザインのポスト閲覧ビューア (単一HTML / 依存ゼロ / オフライン動作)
+  - X(Twitter) の配色トークン・寸法・アイコンパス・フォントは一切流用していません
+  - 読み込み対応形式:
+      1) x-posts-exporter の正規化JSON (レコード配列)
+      2) YTD形式 tweets.js (window.YTD.tweets.part0 = [{"tweet":{...}},...])
+      3) [{"tweet":{...}}] のみのJSON配列
+  - 画像/動画はリモートURL参照のため、メディア表示のみネット接続が必要
+-->
+<style>
+  :root{
+    /* 独自カラーパレット (XのDimテーマとは別系統のスレート+ティール) */
+    --bg:#0d1015;
+    --panel:#161a21;
+    --panel2:#1c222b;
+    --border:#283040;
+    --text:#e9edf3;
+    --sub:#8d99ab;
+    --faint:#5c6675;
+    --accent:#3fbf9f;
+    --accent-dim:rgba(63,191,159,.14);
+    --warn:#e0a458;
+    --link:#7ab8ff;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:
+      radial-gradient(1200px 500px at 70% -10%, rgba(63,191,159,.06), transparent 60%),
+      var(--bg);
+    color:var(--text);
+    font:15px/1.6 system-ui,"Segoe UI","Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+    min-height:100vh;
+  }
+  /* ---------- 上部バー ---------- */
+  .topbar{
+    position:sticky;top:0;z-index:10;
+    background:rgba(13,16,21,.88);backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--border);
+    padding:10px 16px;
+    display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+  }
+  .brand{font-weight:800;letter-spacing:.5px;margin-right:auto;display:flex;align-items:center;gap:8px}
+  .brand .logo{
+    width:26px;height:26px;border-radius:8px;background:var(--accent);
+    display:inline-flex;align-items:center;justify-content:center;color:#0b1210;font-size:15px;font-weight:900;
+  }
+  .topbar input[type=search]{
+    background:var(--panel2);border:1px solid var(--border);color:var(--text);
+    border-radius:10px;padding:7px 12px;font-size:14px;width:min(320px,60vw);outline:none;
+  }
+  .topbar input[type=search]:focus{border-color:var(--accent)}
+  .topbar select{
+    background:var(--panel2);border:1px solid var(--border);color:var(--text);
+    border-radius:10px;padding:7px 10px;font-size:13px;
+  }
+  .topbar button{
+    background:var(--panel2);border:1px solid var(--border);color:var(--text);
+    border-radius:10px;padding:7px 12px;font-size:13px;cursor:pointer;
+  }
+  .topbar button:hover{border-color:var(--accent);color:var(--accent)}
+  /* ---------- ドロップゾーン ---------- */
+  #dropzone{
+    max-width:760px;margin:10vh auto 0;padding:0 16px;
+  }
+  #dropzone .dz{
+    border:2px dashed var(--border);border-radius:18px;
+    padding:64px 24px;text-align:center;color:var(--sub);
+    background:var(--panel);transition:.15s;
+  }
+  #dropzone .dz.over{border-color:var(--accent);background:var(--accent-dim);color:var(--text)}
+  #dropzone .dz .big{font-size:40px;margin-bottom:12px}
+  #dropzone .dz h1{margin:0 0 6px;font-size:19px;color:var(--text)}
+  #dropzone .dz p{margin:4px 0;font-size:13px}
+  #dropzone .dz code{background:var(--panel2);border-radius:6px;padding:1px 6px;font-size:12px;color:var(--accent)}
+  #dropzone .dz button{
+    margin-top:18px;background:var(--accent);color:#0b1210;border:none;font-weight:700;
+    border-radius:12px;padding:11px 26px;font-size:14px;cursor:pointer;
+  }
+  /* ---------- 統計・フィルタ ---------- */
+  #viewer{max-width:760px;margin:18px auto 60px;padding:0 16px}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+  .chip{
+    background:var(--panel);border:1px solid var(--border);border-radius:999px;
+    padding:4px 12px;font-size:12.5px;color:var(--sub);cursor:pointer;user-select:none;
+  }
+  .chip b{color:var(--text);font-weight:600;margin-left:4px}
+  .chip.on{background:var(--accent-dim);border-color:var(--accent);color:var(--accent)}
+  .chip.on b{color:var(--accent)}
+  .range{font-size:12px;color:var(--faint);margin:0 0 14px}
+  /* ---------- 投稿カード ---------- */
+  .post{
+    background:var(--panel);border:1px solid var(--border);border-radius:14px;
+    padding:14px 16px;margin-bottom:10px;
+  }
+  .p-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .avatar{
+    width:42px;height:42px;border-radius:11px;flex:none;object-fit:cover;
+    background:var(--panel2);border:1px solid var(--border);
+    display:inline-flex;align-items:center;justify-content:center;
+    font-weight:800;color:var(--accent);font-size:17px;
+  }
+  .p-meta{min-width:0;flex:1}
+  .p-name{font-weight:700;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .p-sub{font-size:12.5px;color:var(--sub);display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .p-sub a{color:var(--faint);text-decoration:none}
+  .p-sub a:hover{color:var(--link)}
+  .tag{
+    display:inline-block;font-size:10.5px;border-radius:6px;padding:1px 7px;
+    background:var(--panel2);color:var(--sub);border:1px solid var(--border);
+  }
+  .tag.rt{color:var(--warn);border-color:rgba(224,164,88,.4)}
+  .tag.re{color:var(--link);border-color:rgba(122,184,255,.35)}
+  .tag.qt{color:var(--accent);border-color:rgba(63,191,159,.4)}
+  .rtline{font-size:12.5px;color:var(--warn);margin:-2px 0 6px 52px;display:flex;gap:6px;align-items:center}
+  .rtline svg{width:13px;height:13px;flex:none}
+  .reline{font-size:12.5px;color:var(--link);margin:-2px 0 6px 52px}
+  .p-body{margin:2px 0 4px 52px;word-wrap:break-word;overflow-wrap:anywhere;white-space:pre-wrap}
+  .p-body a{color:var(--link);text-decoration:none}
+  .p-body a.taghit{color:var(--accent)}
+  .quoted{
+    margin:8px 0 4px 52px;border:1px solid var(--border);border-left:3px solid var(--accent);
+    border-radius:10px;background:var(--panel2);padding:8px 12px;font-size:13.5px;color:var(--sub);
+  }
+  .quoted .q-head{font-size:12px;color:var(--faint);margin-bottom:2px}
+  .media{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px 52px}
+  .media img,.media video{
+    width:200px;max-height:280px;object-fit:cover;border-radius:10px;
+    border:1px solid var(--border);background:#000;
+  }
+  .media img:hover{filter:brightness(.92)}
+  .acts{display:flex;gap:26px;margin:10px 0 0 52px;color:var(--faint);font-size:12.5px}
+  .acts span{display:inline-flex;align-items:center;gap:5px}
+  .acts svg{width:15px;height:15px}
+  .acts .n{min-width:1.5em}
+  .acts .a-fav.on{color:#ef6a8b}
+  .acts .a-rt.on{color:var(--warn)}
+  /* ---------- 下部 ---------- */
+  #more{
+    display:block;margin:18px auto;background:var(--panel2);color:var(--text);
+    border:1px solid var(--border);border-radius:12px;padding:10px 30px;font-size:14px;cursor:pointer;
+  }
+  #more:hover{border-color:var(--accent);color:var(--accent)}
+  #end{text-align:center;color:var(--faint);font-size:12px;margin:14px 0}
+  #toast{
+    position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(80px);
+    background:var(--panel2);border:1px solid var(--accent);color:var(--text);
+    border-radius:10px;padding:10px 18px;font-size:13px;transition:.25s;z-index:99;max-width:80vw;
+  }
+  #toast.show{transform:translateX(-50%) translateY(0)}
+  .dropping #dropzone .dz{border-color:var(--accent);background:var(--accent-dim)}
+  @media (max-width:640px){
+    .p-body,.media,.acts,.rtline,.reline,.quoted{margin-left:0}
+    .media img,.media video{width:calc(50% - 4px)}
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <span class="brand"><span class="logo">▍</span>PostLog <span style="font-size:11px;color:var(--faint);font-weight:400">ポストアーカイブビューア</span></span>
+  <input type="search" id="search" placeholder="検索 (本文 / ユーザー)">
+  <select id="sort">
+    <option value="new">新しい順</option>
+    <option value="old">古い順</option>
+    <option value="fav">いいね順</option>
+    <option value="rt">リポスト順</option>
+  </select>
+</header>
+
+<section id="dropzone">
+  <div class="dz" id="dz">
+    <div class="big">🗂️</div>
+    <h1>アーカイブを読み込み中…</h1>
+    <p id="dz-status">tweets.js を取得しています</p>
+  </div>
+</section>
+
+<section id="viewer" hidden>
+  <div class="chips" id="chips"></div>
+  <p class="range" id="range"></p>
+  <div id="feed"></div>
+  <button id="more" hidden>さらに表示</button>
+  <div id="end"></div>
+</section>
+
+<div id="toast"></div>
+
+<script>
+(function(){
+'use strict';
+
+/* ============================== 状態 ============================== */
+
+const PAGE = 50;
+const S = {
+  byId: new Map(),   // id -> 正規化レコード
+  list: [],          // 表示対象 (ソート済み全件)
+  shown: 0,
+  filter: 'all',
+  q: '',
+  sort: 'new',
+};
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+/* ============================== 日付・数値 ============================== */
+
+const MON = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+function parseDate(s){
+  if (!s) return 0;
+  const m = /^\w{3}\s+([A-Za-z]{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})\s*\+0000\s+(\d{4})$/.exec(String(s).trim());
+  if (m) return Date.UTC(+m[6], MON[m[1]]||0, +m[2], +m[3], +m[4], +m[5]);
+  const d = new Date(s);
+  return isNaN(d) ? 0 : d.getTime();
+}
+function fmtDate(ts){
+  if (!ts) return '';
+  const d = new Date(ts);
+  return d.toLocaleDateString('ja-JP',{year:'numeric',month:'long',day:'numeric'}) +
+    ' ' + d.toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+}
+function fmtShort(ts){
+  if (!ts) return '−';
+  const d = new Date(ts);
+  return d.toLocaleDateString('ja-JP',{year:'numeric',month:'short',day:'numeric'});
+}
+function fmtNum(n){
+  n = Number(n)||0;
+  if (n >= 10000) return (n/10000).toFixed(1).replace(/\.0$/,'') + '万';
+  return n.toLocaleString('ja-JP');
+}
+
+/* ============================== 読み込み・解析 ============================== */
+
+function parseInput(text, name){
+  let data = null;
+  try { data = JSON.parse(text); } catch(e){}
+  if (data == null){
+    // YTD形式: window.YTD.tweets.part0 = [...]; を剥がす
+    const m = /window\.YTD\.[A-Za-z_]+\.part\d+\s*=\s*([\s\S]+?);?\s*$/.exec(text.trim());
+    if (m){ try { data = JSON.parse(m[1]); } catch(e){} }
+  }
+  if (!Array.isArray(data)) throw new Error(name + ': 配列形式として解析できません');
+  const out = [];
+  for (const item of data){
+    if (item && item.tweet) out.push(normalizeYtd(item.tweet));
+    else if (item && (item.id_str || item.full_text)) out.push(normalizeNorm(item));
+  }
+  const ok = out.filter(r => r && r.id);
+  if (!ok.length) throw new Error(name + ': ポストレコードが見つかりません');
+  return ok;
+}
+
+// x-posts-exporter の正規化JSON → 内部形式
+function normalizeNorm(r){
+  const inner = r.retweeted_status_result && r.retweeted_status_result.result || null;
+  const innerLg = inner && (inner.legacy || inner) || null;
+  const isRT = !!(r.is_retweet || innerLg);
+  return base({
+    id: r.id_str,
+    ts: parseDate(r.created_at),
+    text: r.full_text || '',
+    entities: r.entities || {},
+    media: (r.extended_entities && r.extended_entities.media) || [],
+    user: r.user || null,
+    isRT,
+    inner: innerLg ? {
+      text: (inner.note_tweet && inner.note_tweet.note_tweet_results && inner.note_tweet.note_tweet_results.result
+        ? inner.note_tweet.note_tweet_results.result.text : innerLg.full_text) || '',
+      entities: innerLg.entities || {},
+      media: (innerLg.extended_entities && innerLg.extended_entities.media) || [],
+    } : null,
+    replyTo: r.in_reply_to_screen_name || null,
+    quoted: r.quoted_tweet ? { text:r.quoted_tweet.full_text, screen:r.quoted_tweet.screen_name } : null,
+    fav: r.favorite_count, rt: r.retweet_count, rep: r.reply_count, qt: r.quote_count,
+    views: r.views_count,
+  });
+}
+
+// YTD形式 (tweet = legacy 相当) → 内部形式
+function normalizeYtd(t){
+  const innerLg = (t.retweeted_status_result && t.retweeted_status_result.result &&
+      (t.retweeted_status_result.result.legacy || t.retweeted_status_result.result)) ||
+    t.retweeted_status || null;
+  const noteText = t.note_tweet && t.note_tweet.note_tweet_results && t.note_tweet.note_tweet_results.result
+    ? t.note_tweet.note_tweet_results.result.text : null;
+  const innerNote = innerLg && innerLg.note_tweet && innerLg.note_tweet.note_tweet_results &&
+    innerLg.note_tweet.note_tweet_results.result ? innerLg.note_tweet.note_tweet_results.result.text : null;
+  const q = (t.quoted_status_result && t.quoted_status_result.result &&
+      (t.quoted_status_result.result.legacy || t.quoted_status_result.result)) || t.quoted_status || null;
+  return base({
+    id: t.id_str,
+    ts: parseDate(t.created_at),
+    text: noteText || t.full_text || '',
+    entities: t.entities || {},
+    media: (t.extended_entities && t.extended_entities.media) || [],
+    user: t.user || null,
+    isRT: !!innerLg,
+    inner: innerLg ? {
+      text: innerNote || innerLg.full_text || '',
+      entities: innerLg.entities || {},
+      media: (innerLg.extended_entities && innerLg.extended_entities.media) || [],
+    } : null,
+    replyTo: t.in_reply_to_screen_name || null,
+    quoted: q ? {
+      text: q.full_text || '',
+      screen: (q.user && q.user.screen_name) || (q.core && q.core.user_results && q.core.user_results.result &&
+        q.core.user_results.result.legacy && q.core.user_results.result.legacy.screen_name) || null,
+    } : null,
+    fav: t.favorite_count, rt: t.retweet_count, rep: t.reply_count, qt: t.quote_count,
+    views: null,
+  });
+}
+
+function base(x){
+  let text = x.text || '';
+  let rtBy = null;
+  if (x.isRT && x.inner){
+    const m = /^RT @([A-Za-z0-9_]+):/.exec(text);
+    rtBy = m ? m[1] : null;
+    text = x.inner.text || text.replace(/^RT @[A-Za-z0-9_]+:\s*/, '');
+  }
+  const user = x.user && (x.user.screen_name ? x.user : null);
+  return {
+    id: String(x.id || ''),
+    ts: x.ts || 0,
+    text,
+    entities: (x.isRT && x.inner) ? x.inner.entities : x.entities,
+    media: ((x.isRT && x.inner) ? x.inner.media : x.media) || [],
+    user,
+    isRT: !!x.isRT, rtBy,
+    isReply: !!x.replyTo, replyTo: x.replyTo,
+    isQuote: !!x.quoted, quoted: x.quoted,
+    fav: x.fav|0, rt: x.rt|0, rep: x.rep|0, qt: x.qt|0, views: x.views,
+    hasMedia: (((x.isRT && x.inner) ? x.inner.media : x.media) || []).length > 0,
+    isLong: (text || '').length > 280,
+  };
+}
+
+/* ============================== 本文レンダリング ============================== */
+
+// entities の indices (コードポイント単位) に従い、URL/ハッシュタグ/メンションを修飾
+function renderText(rec){
+  const raw = rec.text || '';
+  const cps = Array.from(raw);
+  const n = cps.length;
+  const marks = new Array(n).fill(null);
+  const ents = rec.entities || {};
+  const put = (ind, mark) => {
+    if (!ind || ind[0] < 0 || ind[1] > n || ind[1] <= ind[0]) return;
+    if (marks[ind[0]]) return;
+    marks[ind[0]] = { len: ind[1] - ind[0], ...mark };
+  };
+  (ents.hashtags || []).forEach(h => put(h.indices, {k:'tag', q:'#' + h.text}));
+  (ents.user_mentions || []).forEach(u => put(u.indices, {k:'tag', q:'@' + u.screen_name}));
+  (ents.urls || []).forEach(u => put(u.indices, {k:'url', href:u.expanded_url || u.url, label:u.display_url || u.url}));
+  (ents.media || []).forEach(mm => put(mm.indices, {k:'hide'})); // 末尾のt.coメディアリンクは非表示
+
+  let html = '', i = 0;
+  while (i < n){
+    const mk = marks[i];
+    if (!mk){ html += esc(cps[i]); i++; continue; }
+    const seg = cps.slice(i, i + mk.len).join('');
+    if (mk.k === 'url'){
+      html += '<a href="' + esc(mk.href) + '" target="_blank" rel="noopener noreferrer">' + esc(mk.label) + '</a>';
+    } else if (mk.k === 'tag'){
+      html += '<a href="#" class="taghit" data-q="' + esc(mk.q) + '">' + esc(seg) + '</a>';
+    } // k==='hide' は出力しない
+    i += mk.len;
+  }
+  // entities が壊れている場合の保険: 末尾に残った t.co リンクを除去
+  return html.replace(/\s*https:\/\/t\.co\/[A-Za-z0-9]+<\/a>\s*$/,'')
+             .replace(/\s*(?:<a[^>]*>)?https:\/\/t\.co\/[A-Za-z0-9]+(?:<\/a>)?\s*$/,'');
+}
+
+function mediaHtml(rec){
+  const media = rec.media || [];
+  if (!media.length) return '';
+  let out = '';
+  for (const m of media){
+    if (m.type === 'photo'){
+      out += '<img loading="lazy" referrerpolicy="no-referrer" alt="" src="' + esc(m.media_url_https) + '">';
+    } else if (m.video_info && m.video_info.variants){
+      const vids = m.video_info.variants.filter(v => v.content_type === 'video/mp4')
+        .sort((a,b) => (b.bitrate||0) - (a.bitrate||0));
+      if (vids.length){
+        const attrs = m.type === 'animated_gif' ? ' muted loop autoplay' : ' controls preload="metadata"';
+        out += '<video' + attrs + ' playsinline src="' + esc(vids[0].url) + '"></video>';
+      }
+    }
+  }
+  return out ? '<div class="media">' + out + '</div>' : '';
+}
+
+/* ============================== アイコン (自作の単純な図形) ============================== */
+
+const IC = {
+  rep:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v10H9l-5 4z"/></svg>',
+  rt:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 11V9a4 4 0 0 1 4-4h9M15 2l3 3-3 3M19 13v2a4 4 0 0 1-4 4H6M9 22l-3-3 3-3"/></svg>',
+  fav:  '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 21C7.5 17.8 3 14.2 3 9.9 3 7.1 5.1 5 7.7 5c1.8 0 3.2.9 4.3 2.4C13.1 5.9 14.5 5 16.3 5 18.9 5 21 7.1 21 9.9c0 4.3-4.5 7.9-9 11.1z"/></svg>',
+  qt:   '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 6h7v6H8c0 2 1.2 3.2 3 3.4V18c-4 0-7-2.5-7-7V6zm10 0h7v6h-3c0 2 1.2 3.2 3 3.4V18c-4 0-7-2.5-7-7V6z"/></svg>',
+};
+
+/* ============================== 投稿カード ============================== */
+
+function postHtml(rec){
+  const u = rec.user;
+  const name = (u && u.name) || '(不明なユーザー)';
+  const screen = u && u.screen_name ? '@' + u.screen_name : '';
+  const avatar = u && u.profile_image_url_https
+    ? '<img class="avatar" loading="lazy" referrerpolicy="no-referrer" alt="" src="' + esc(u.profile_image_url_https) + '">'
+    : '<span class="avatar">' + esc((name || '?').slice(0,1)) + '</span>';
+
+  let badges = '';
+  if (rec.isRT) badges += '<span class="tag rt">リポスト</span>';
+  if (rec.isReply) badges += '<span class="tag re">返信</span>';
+  if (rec.isQuote) badges += '<span class="tag qt">引用</span>';
+  if (rec.isLong) badges += '<span class="tag">長文</span>';
+
+  const ext = u && u.screen_name
+    ? ' <a href="https://x.com/' + esc(u.screen_name) + '/status/' + esc(rec.id) + '" target="_blank" rel="noopener noreferrer">原文↗</a>'
+    : '';
+
+  let pre = '';
+  if (rec.isRT) pre += '<div class="rtline">' + IC.rt + (rec.rtBy ? '@' + esc(rec.rtBy) + ' からのリポスト' : 'リポスト') + '</div>';
+  if (rec.isReply && rec.replyTo) pre += '<div class="reline">↩ @' + esc(rec.replyTo) + ' への返信</div>';
+
+  let quoted = '';
+  if (rec.quoted && (rec.quoted.text || rec.quoted.screen)){
+    quoted = '<div class="quoted"><div class="q-head">' +
+      (rec.quoted.screen ? '@' + esc(rec.quoted.screen) : '引用') + ' より</div>' +
+      esc((rec.quoted.text || '').slice(0,140)) + ((rec.quoted.text||'').length > 140 ? '…' : '') +
+      '</div>';
+  }
+
+  const favCls = rec.fav > 0 ? 'a-fav on' : 'a-fav';
+  const rtCls = rec.rt > 0 ? 'a-rt on' : 'a-rt';
+
+  return '<article class="post" id="p' + esc(rec.id) + '">' +
+    '<div class="p-head">' + avatar +
+      '<div class="p-meta">' +
+        '<div class="p-name">' + esc(name) + ' <span style="color:var(--sub);font-weight:400;font-size:13px">' + esc(screen) + '</span></div>' +
+        '<div class="p-sub"><span>' + esc(fmtDate(rec.ts)) + '</span>' + ext + ' <span>' + badges + '</span></div>' +
+      '</div>' +
+    '</div>' + pre +
+    '<div class="p-body">' + renderText(rec) + '</div>' + quoted + mediaHtml(rec) +
+    '<div class="acts">' +
+      '<span>' + IC.rep + '<span class="n">' + fmtNum(rec.rep) + '</span></span>' +
+      '<span class="' + rtCls + '">' + IC.rt + '<span class="n">' + fmtNum(rec.rt) + '</span></span>' +
+      '<span class="' + favCls + '">' + IC.fav + '<span class="n">' + fmtNum(rec.fav) + '</span></span>' +
+      '<span>' + IC.qt + '<span class="n">' + fmtNum(rec.qt) + '</span></span>' +
+    '</div>' +
+  '</article>';
+}
+
+/* ============================== フィルタ・描画 ============================== */
+
+function applyFilters(){
+  const q = S.q.trim().toLowerCase();
+  let list = [...S.byId.values()];
+  if (S.filter === 'replies') list = list.filter(r => r.isReply);
+  if (S.filter === 'rts') list = list.filter(r => r.isRT);
+  if (S.filter === 'media') list = list.filter(r => r.hasMedia);
+  if (S.filter === 'long') list = list.filter(r => r.isLong);
+  if (q) list = list.filter(r =>
+    r.text.toLowerCase().includes(q) ||
+    (r.user && r.user.screen_name && r.user.screen_name.toLowerCase().includes(q)) ||
+    (r.user && r.user.name && r.user.name.toLowerCase().includes(q)));
+  const c = {
+    new: (a,b) => b.ts - a.ts,
+    old: (a,b) => a.ts - b.ts,
+    fav: (a,b) => (b.fav - a.fav) || (b.ts - a.ts),
+    rt:  (a,b) => (b.rt - a.rt) || (b.ts - a.ts),
+  }[S.sort];
+  list.sort(c);
+  S.list = list;
+  S.shown = Math.min(PAGE, list.length);
+  render();
+}
+
+function render(){
+  $('feed').innerHTML = S.list.slice(0, S.shown).map(postHtml).join('');
+  $('more').hidden = S.shown >= S.list.length;
+  $('more').textContent = 'さらに表示 (残り ' + fmtNum(S.list.length - S.shown) + ' 件)';
+  $('end').textContent = S.list.length
+    ? '全 ' + fmtNum(S.list.length) + ' 件中 ' + fmtNum(S.shown) + ' 件を表示' : '該当する投稿がありません';
+}
+
+function renderChips(){
+  const all = [...S.byId.values()];
+  const defs = [
+    ['all','すべて', all.length],
+    ['replies','返信', all.filter(r=>r.isReply).length],
+    ['rts','リポスト', all.filter(r=>r.isRT).length],
+    ['media','メディア', all.filter(r=>r.hasMedia).length],
+    ['long','長文', all.filter(r=>r.isLong).length],
+  ];
+  $('chips').innerHTML = defs.map(([k,label,n]) =>
+    '<span class="chip' + (S.filter===k?' on':'') + '" data-f="' + k + '">' + label + '<b>' + fmtNum(n) + '</b></span>'
+  ).join('');
+  const ts = all.map(r=>r.ts).filter(Boolean);
+  $('range').textContent = ts.length
+    ? '📌 ' + fmtShort(Math.min(...ts)) + ' 〜 ' + fmtShort(Math.max(...ts)) +
+      ' ・ ' + fmtNum(all.length) + ' 件を読み込み済み (メディア表示はネット接続が必要)' : '';
+}
+
+/* ============================== ファイル読み込み ============================== */
+
+let toastTimer = null;
+function toast(msg){
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+/* ---------- 起動時の自動読み込み (tweets.js は同梱済み) ---------- */
+
+async function boot(){
+  const status = $('dz-status');
+  try {
+    const res = await fetch('tweets.js', {cache:'no-cache'});
+    if (!res.ok) throw new Error('tweets.js の取得に失敗しました (HTTP ' + res.status + ')');
+    status.textContent = '解析中…';
+    const text = await res.text();
+    for (const rec of parseInput(text, 'tweets.js')){
+      if (!S.byId.has(rec.id)) S.byId.set(rec.id, rec);
+    }
+    if (!S.byId.size) throw new Error('ポストレコードが見つかりません');
+    $('dropzone').hidden = true;
+    $('viewer').hidden = false;
+    renderChips();
+    applyFilters();
+    toast(fmtNum(S.byId.size) + ' 件のポストを読み込みました');
+  } catch(e){
+    status.textContent = '読み込みエラー: ' + e.message;
+  }
+}
+boot();
+
+/* ============================== イベント ============================== */
+
+$('search').addEventListener('input', (e) => { S.q = e.target.value; applyFilters(); });
+$('sort').addEventListener('change', (e) => { S.sort = e.target.value; applyFilters(); });
+$('chips').addEventListener('click', (e) => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  S.filter = chip.dataset.f;
+  renderChips();
+  applyFilters();
+});
+$('feed').addEventListener('click', (e) => {
+  const a = e.target.closest('a.taghit');
+  if (!a) return;
+  e.preventDefault();
+  $('search').value = S.q = a.dataset.q;
+  applyFilters();
+  window.scrollTo({top:0, behavior:'smooth'});
+});
+$('more').addEventListener('click', () => {
+  S.shown = Math.min(S.shown + PAGE, S.list.length);
+  render();
+});
+
+
+})();
+</script>
+</body>
+</html>
